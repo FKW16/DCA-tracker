@@ -1,0 +1,40 @@
+# macOS / Xcode
+.DS_Store
+DerivedData/
+build/
+.build/
+.swiftpm/
+*.xcuserstate
+xcuserdata/
+*.xccheckout
+*.xcscmblueprint
+*.log
+
+# Secrets and local configuration
+.env
+.env.*
+*.env
+*APIKey*.xcconfig
+*Secrets*.xcconfig
+secrets/
+
+# Runtime and personal investment data
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.csv
+exports/
+export/
+*.export.json
+*-export.json
+export-*.json
+backups/
+backup/
+*.backup
+*.bak
+
+# 归档/压缩包
+*.zip
