@@ -54,6 +54,34 @@ final class StrategyEngineTests: XCTestCase {
         let result = try value(input(amount: 70, assets: [asset("A", weight: 0.5, live: 40), asset("B", weight: 0.5, live: 30)]))
         XCTAssertEqual(result.assets.map(\.shares), [1, 1]); XCTAssertEqual(result.estimatedSpend, 70)
     }
+    func testIntegerOptimizerPrioritizesUsingBudgetThenChoosesClosestWeights() throws {
+        let result = try value(input(amount: 100, assets: [asset("A", weight: 0.8, live: 60), asset("B", weight: 0.2, live: 20)]))
+        XCTAssertEqual(result.estimatedSpend, 100); XCTAssertEqual(result.assets.map(\.shares), [1, 2])
+    }
+    func testIntegerOptimizerDoesNotLeaveLargeCashBalanceForPerfectRatio() throws {
+        let result = try value(input(amount: 11_000, assets: [asset("A", weight: 0.6, live: Decimal(string: "317.31")!), asset("B", weight: 0.4, live: Decimal(string: "113.27")!)]))
+        XCTAssertLessThan(result.remainingCash, Decimal(string: "113.27")!); XCTAssertEqual(result.estimatedSpend + result.remainingCash, 11_000)
+    }
+    func testExactSpendingCheapAssetDoesNotCrowdOutQQQM() throws {
+        let result = try value(input(amount: 2_000, assets: [asset("QQQM", weight: 0.5, live: 210), asset("OTHER", weight: 0.5, live: 100)]))
+        XCTAssertGreaterThan(result.assets[0].shares, 0)
+        XCTAssertLessThan(result.remainingCash, 100)
+        XCTAssertLessThan(result.assets.reduce(0) { $0 + $1.weightDeviation }, Decimal(string: "0.1")!)
+    }
+    func testRepeatedContributionsKeepBuyingHigherPricedTargetAsset() throws {
+        var qqqmQuantity: Decimal = 0, otherQuantity: Decimal = 0
+        for _ in 0..<8 {
+            let result = try value(input(amount: 2_000, assets: [
+                asset("QQQM", weight: 0.5, quantity: qqqmQuantity, live: 210),
+                asset("OTHER", weight: 0.5, quantity: otherQuantity, live: 100)
+            ]))
+            let qqqmPurchase = result.assets[0].shares
+            XCTAssertGreaterThan(qqqmPurchase, 0)
+            qqqmQuantity += qqqmPurchase; otherQuantity += result.assets[1].shares
+        }
+        let qqqmValue = qqqmQuantity * 210, otherValue = otherQuantity * 100
+        XCTAssertLessThan(abs(qqqmValue / (qqqmValue + otherValue) - 0.5), Decimal(string: "0.03")!)
+    }
     func testSinglePlanMigrationCreatesBackupAndIsIdempotent() throws {
         let schema = Schema([BrokerageAccount.self, Investment.self, Purchase.self, Sale.self, Dividend.self, TransactionTag.self, InvestmentPortfolio.self, PortfolioAsset.self, InvestmentPlan.self, PlanExecution.self])
         let container = try ModelContainer(for: schema, configurations: ModelConfiguration(isStoredInMemoryOnly: true)), context = ModelContext(container)

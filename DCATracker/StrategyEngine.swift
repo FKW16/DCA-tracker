@@ -70,7 +70,7 @@ enum StrategyEngine {
         let target = input.periodAmount * Decimal(input.periodIndex)
         return .success(.init(periodBudget: budget, estimatedSpend: spent, remainingCash: budget - spent,
                               targetValue: target, currentValue: currentValue, strategyDifference: target - currentValue,
-                              assets: suggestions, reason: "在不超预算下优化买后目标权重"))
+                              assets: suggestions, reason: "先将剩余现金控制到不足一股，再优先让组合靠近目标权重"))
     }
 
     private struct Candidate { let shares: [Int]; let spent: Decimal; let deviation: Decimal }
@@ -101,22 +101,28 @@ enum StrategyEngine {
             return Candidate(shares: shares, spent: priced[cheapest].1,
                              deviation: deviation(priced: priced, shares: shares, currentValue: currentValue))
         }
-        // Large searches use a deterministic bounded dynamic-programming frontier. The cap is explicit and tested.
-        var frontier = [Candidate(shares: [], spent: 0, deviation: 0)]
-        for index in priced.indices {
-            var next: [Candidate] = []
-            for candidate in frontier {
-                let maximum = affordableShareLimit(price: priced[index].1, budget: budget - candidate.spent)
-                for count in 0...maximum {
-                    let shares = candidate.shares + [count], spent = candidate.spent + Decimal(count) * priced[index].1
-                    let padded = shares + Array(repeating: 0, count: priced.count - shares.count)
-                    next.append(.init(shares: shares, spent: spent, deviation: deviation(priced: priced, shares: padded, currentValue: currentValue)))
-                }
-            }
-            next.sort { isBetter($0, than: $1, priced: priced, budget: budget) }
-            frontier = Array(next.prefix(boundedStateLimit))
+        // A large Cartesian search uses deterministic one-share allocation. Each step chooses the
+        // affordable purchase that best improves the post-trade weights. It continues until no
+        // additional share is affordable, so a divisible cheap asset cannot crowd out an
+        // underweight, higher-priced asset merely because it can spend the budget exactly.
+        var shares = Array(repeating: 0, count: priced.count)
+        var spent: Decimal = 0
+        while true {
+            let affordable = priced.indices.filter { spent + priced[$0].1 <= budget }
+            guard !affordable.isEmpty else { break }
+            let selected = affordable.min { lhs, rhs in
+                var left = shares; left[lhs] += 1
+                var right = shares; right[rhs] += 1
+                let leftDeviation = deviation(priced: priced, shares: left, currentValue: currentValue)
+                let rightDeviation = deviation(priced: priced, shares: right, currentValue: currentValue)
+                if leftDeviation != rightDeviation { return leftDeviation < rightDeviation }
+                if priced[lhs].1 != priced[rhs].1 { return priced[lhs].1 > priced[rhs].1 }
+                return priced[lhs].0.id < priced[rhs].0.id
+            }!
+            shares[selected] += 1; spent += priced[selected].1
         }
-        return frontier.filter { $0.shares.contains(where: { $0 > 0 }) }.min { isBetter($0, than: $1, priced: priced, budget: budget) }!
+        return Candidate(shares: shares, spent: spent,
+                         deviation: deviation(priced: priced, shares: shares, currentValue: currentValue))
     }
 
     private static func affordableShareLimit(price: Decimal, budget: Decimal) -> Int {
@@ -128,6 +134,10 @@ enum StrategyEngine {
     }
 
     private static func isBetter(_ lhs: Candidate, than rhs: Candidate, priced: [(AssetPlanInput, Decimal, PriceSource)], budget: Decimal) -> Bool {
+        let cheapest = priced.map(\.1).min()!
+        let lhsSaturatesBudget = budget - lhs.spent < cheapest
+        let rhsSaturatesBudget = budget - rhs.spent < cheapest
+        if lhsSaturatesBudget != rhsSaturatesBudget { return lhsSaturatesBudget }
         if lhs.deviation != rhs.deviation { return lhs.deviation < rhs.deviation }
         if budget - lhs.spent != budget - rhs.spent { return budget - lhs.spent < budget - rhs.spent }
         let order = priced.indices.sorted { priced[$0].0.id < priced[$1].0.id }

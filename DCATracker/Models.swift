@@ -120,6 +120,15 @@ final class TransactionTag {
 }
 
 enum TransactionKind: String, CaseIterable { case purchase, sale, dividend }
+
+enum InvestmentDeletionService {
+    static func delete(_ investment: Investment, portfolioAssets: [PortfolioAsset], context: ModelContext) throws {
+        for asset in portfolioAssets where asset.investment?.id == investment.id { context.delete(asset) }
+        context.delete(investment)
+        try context.save()
+    }
+}
+
 struct TransactionFilter {
     static func matches(tags: [TransactionTag], selectedTagIDs: Set<UUID>) -> Bool {
         selectedTagIDs.isEmpty || tags.contains { selectedTagIDs.contains($0.id) }
