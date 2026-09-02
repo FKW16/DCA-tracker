@@ -77,4 +77,54 @@ enum BenchmarkDashboard {
             return .init(date: point.0, portfolioReturn: portfolioReturn, benchmarkReturn: point.1)
         }
     }
+
+    /// 组合真实历史收益曲线:按月用各标的历史收盘价合成组合市值(不伪造行情)。
+    /// 缺历史行情的标的按投入成本计入(该部分收益为 0),并通过 missingSymbols 提示。
+    /// 末点用当前真实市值 + 累计卖出回款校准,口径:收益 =(市值+回款)÷投入−1。
+    static func curveWithPortfolio(purchases: [Purchase], sales: [Sale], spyPrices: [HistoricalPrice], portfolioPrices: [String: [HistoricalPrice]], currentPortfolioValue: Decimal, calendar: Calendar = .current) -> (points: [ReturnPoint], missingSymbols: [String])? {
+        guard !purchases.isEmpty, !spyPrices.isEmpty else { return nil }
+        // 基准月度点(份额法,与原逻辑一致)
+        let invested = purchases.reduce(0) { $0 + $1.quantity * $1.price + $1.fee }
+        var flows = purchases.map { BenchmarkCashFlow(date: $0.date, amount: $0.quantity * $0.price + $0.fee, portfolioFractionSold: 0) }
+        flows += sales.map { sale in
+            let heldBefore = purchases.filter { $0.date <= sale.date }.reduce(0) { $0 + $1.quantity } - sales.filter { $0.date < sale.date }.reduce(0) { $0 + $1.quantity }
+            return BenchmarkCashFlow(date: sale.date, amount: 0, portfolioFractionSold: heldBefore > 0 ? min(sale.quantity / heldBefore, 1) : 0)
+        }
+        guard case .success(let dailyBenchmark) = BenchmarkEngine.returnCurve(cashFlows: flows, prices: spyPrices) else { return nil }
+        var benchmark: [(Date, Decimal)] = []
+        for point in dailyBenchmark {
+            if let last = benchmark.last, calendar.isDate(last.0, equalTo: point.0, toGranularity: .month) { benchmark[benchmark.count - 1] = point } else { benchmark.append(point) }
+        }
+        // 组合月度真实收益:各标的按历史收盘价估值
+        var missing: [String] = []
+        let buyByKey = Dictionary(grouping: purchases) { $0.investment?.symbol ?? "" }
+        let saleByKey = Dictionary(grouping: sales) { $0.investment?.symbol ?? "" }
+        var points: [ReturnPoint] = []
+        for anchor in benchmark {
+            let date = anchor.0
+            var value = Decimal.zero, soldCash = Decimal.zero, investedAt = Decimal.zero
+            for symbol in buyByKey.keys {
+                let buys = (buyByKey[symbol] ?? []).filter { $0.date <= date }
+                let sells = (saleByKey[symbol] ?? []).filter { $0.date <= date }
+                let shares = buys.reduce(Decimal.zero) { $0 + $1.quantity } - sells.reduce(Decimal.zero) { $0 + $1.quantity }
+                let cost = buys.reduce(Decimal.zero) { $0 + $1.quantity * $1.price + $1.fee }
+                soldCash += sells.reduce(Decimal.zero) { $0 + $1.quantity * $1.price - $1.fee }
+                investedAt += cost
+                var contribution: Decimal?
+                if let prices = portfolioPrices[symbol], let first = prices.first, date >= first.date, let price = BenchmarkEngine.previousPrice(on: date, prices: prices)?.close {
+                    contribution = shares * price
+                }
+                value += contribution ?? cost
+                if contribution == nil, cost > 0, !missing.contains(symbol) { missing.append(symbol) }
+            }
+            guard investedAt > 0 else { continue }
+            points.append(.init(date: date, portfolioReturn: (value + soldCash) / investedAt - 1, benchmarkReturn: anchor.1))
+        }
+        // 末点用当前真实市值校准
+        if invested > 0, let last = points.last {
+            let soldCashNow = sales.reduce(Decimal.zero) { $0 + $1.quantity * $1.price - $1.fee }
+            points[points.count - 1] = .init(date: last.date, portfolioReturn: (currentPortfolioValue + soldCashNow) / invested - 1, benchmarkReturn: last.benchmarkReturn)
+        }
+        return (points, missing)
+    }
 }

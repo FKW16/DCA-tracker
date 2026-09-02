@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 
 struct LedgerRecord: Codable, Equatable, Identifiable {
     let id: UUID; let type: String; let date: Date; let symbol: String; let account: String
+    var accountID: UUID? = nil
     let quantity: Decimal?; let price: Decimal?; let amount: Decimal; let tags: [String]; let note: String
 }
 struct BackupEnvelope: Codable, Equatable { static let currentVersion = 1; let version: Int; let createdAt: Date; let records: [LedgerRecord] }
@@ -37,7 +38,7 @@ enum ExportService {
 }
 
 struct ExportDocument: FileDocument {
-    static var readableContentTypes: [UTType] { [.json, .commaSeparatedText] }
+    static var readableContentTypes: [UTType] { [.json, .commaSeparatedText, .plainText] }
     var data: Data
     init(data: Data = Data()) { self.data = data }
     init(configuration: ReadConfiguration) throws { data = configuration.file.regularFileContents ?? Data() }

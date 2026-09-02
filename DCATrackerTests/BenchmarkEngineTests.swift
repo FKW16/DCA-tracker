@@ -50,4 +50,51 @@ final class BenchmarkEngineTests: XCTestCase {
         XCTAssertEqual(points.count, 2)
         XCTAssertEqual(points.map(\.benchmarkReturn), [Decimal(string: "0.1")!, Decimal(string: "0.2")!])
     }
+
+    func testCurveWithPortfolioComputesRealMonthlyReturns() throws {
+        let calendar = Calendar(identifier: .gregorian)
+        let date: (Int, Int) -> Date = { month, day in calendar.date(from: DateComponents(year: 2025, month: month, day: day))! }
+        let account = BrokerageAccount(name: "A"), investment = Investment(symbol: "VTI", name: "VTI")
+        let purchase = Purchase(date: date(1, 1), quantity: 10, price: 10, account: account, investment: investment)
+        let prices: [HistoricalPrice] = [.init(date: date(1, 1), close: 10), .init(date: date(1, 31), close: 11), .init(date: date(2, 28), close: 12)]
+        let result = try XCTUnwrap(BenchmarkDashboard.curveWithPortfolio(
+            purchases: [purchase], sales: [], spyPrices: prices,
+            portfolioPrices: ["VTI": prices], currentPortfolioValue: 120, calendar: calendar))
+        XCTAssertTrue(result.missingSymbols.isEmpty)
+        // 1月末:10 股 × 11 = 110,投入 100 → +10%;2月末:当前市值 120 → +20%
+        XCTAssertEqual(result.points.map(\.portfolioReturn), [Decimal(string: "0.1")!, Decimal(string: "0.2")!])
+        XCTAssertEqual(result.points.map(\.benchmarkReturn), [Decimal(string: "0.1")!, Decimal(string: "0.2")!])
+    }
+
+    func testCurveWithPortfolioCountsMissingPriceSymbolsAtCost() throws {
+        let calendar = Calendar(identifier: .gregorian)
+        let date: (Int, Int) -> Date = { month, day in calendar.date(from: DateComponents(year: 2025, month: month, day: day))! }
+        let account = BrokerageAccount(name: "A")
+        let vti = Investment(symbol: "VTI", name: "VTI"), voo = Investment(symbol: "VOO", name: "VOO")
+        let purchases = [Purchase(date: date(1, 1), quantity: 10, price: 10, account: account, investment: vti),
+                         Purchase(date: date(1, 1), quantity: 10, price: 10, account: account, investment: voo)]
+        let result = try XCTUnwrap(BenchmarkDashboard.curveWithPortfolio(
+            purchases: purchases, sales: [],
+            spyPrices: [.init(date: date(1, 1), close: 10), .init(date: date(1, 31), close: 11)],
+            portfolioPrices: ["VTI": [.init(date: date(1, 1), close: 10), .init(date: date(1, 31), close: 11)]],
+            currentPortfolioValue: 210, calendar: calendar))
+        // VOO 缺历史行情,按成本 100 计入:1月末 =(110+100)/200−1 = 5%
+        XCTAssertEqual(result.missingSymbols, ["VOO"])
+        XCTAssertEqual(result.points.map(\.portfolioReturn), [Decimal(string: "0.05")!])
+    }
+
+    func testCurveWithPortfolioIncludesSaleProceeds() throws {
+        let calendar = Calendar(identifier: .gregorian)
+        let date: (Int, Int) -> Date = { month, day in calendar.date(from: DateComponents(year: 2025, month: month, day: day))! }
+        let account = BrokerageAccount(name: "A"), investment = Investment(symbol: "VTI", name: "VTI")
+        let purchase = Purchase(date: date(1, 1), quantity: 10, price: 10, account: account, investment: investment)
+        let sale = Sale(date: date(2, 1), quantity: 5, price: 12, account: account, investment: investment)
+        let result = try XCTUnwrap(BenchmarkDashboard.curveWithPortfolio(
+            purchases: [purchase], sales: [sale],
+            spyPrices: [.init(date: date(1, 1), close: 10), .init(date: date(1, 31), close: 10), .init(date: date(2, 28), close: 10)],
+            portfolioPrices: ["VTI": [.init(date: date(1, 1), close: 10), .init(date: date(1, 31), close: 10), .init(date: date(2, 28), close: 12)]],
+            currentPortfolioValue: 60, calendar: calendar))
+        // 1月末:持股 10 × 10 = 100,投入 100 → 0%;2月末:持股 5 × 12 = 60 + 回款 60 = 120 → +20%
+        XCTAssertEqual(result.points.map(\.portfolioReturn), [0, Decimal(string: "0.2")!])
+    }
 }

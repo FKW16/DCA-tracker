@@ -39,3 +39,8 @@ backup/
 
 # 归档/压缩包
 *.zip
+
+# 构建产物与运行时生成文件
+build-test/
+holdings-report.md
+.workbuddy/
