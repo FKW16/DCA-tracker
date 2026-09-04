@@ -49,8 +49,6 @@ struct DashboardView: View {
     @Query private var investments: [Investment]
     @Query private var purchases: [Purchase]
     @Query private var sales: [Sale]
-    @State private var spyPrices: [HistoricalPrice] = []; @State private var spyStatus = "尚未加载 SPY 基准"
-    @State private var curvePoints: [ReturnPoint] = []; @State private var curveMissing: [String] = []
     @State private var refreshing = false; @State private var quoteStatus = ""
     @State private var holdings: [PositionHolding] = []
     @AppStorage("dashboardHoldingOrder") private var holdingOrder = ""
@@ -65,14 +63,8 @@ struct DashboardView: View {
         for (index, symbol) in saved.enumerated() { rank[symbol] = index }
         return holdings.sorted { (rank[$0.symbol] ?? Int.max, $0.symbol) < (rank[$1.symbol] ?? Int.max, $1.symbol) }
     }
-    /// 曲线 Y 轴范围:包含零线,上下各留 12% 呼吸空间
-    private var curveDomain: ClosedRange<Double> {
-        let values = curvePoints.compactMap(\.portfolioReturn).map { NSDecimalNumber(decimal: $0).doubleValue }
-            + curvePoints.map { NSDecimalNumber(decimal: $0.benchmarkReturn).doubleValue }
-        let lo = min(0, values.min() ?? 0), hi = max(0, values.max() ?? 0)
-        let pad = max((hi - lo) * 0.12, 0.01)
-        return (lo - pad)...(hi + pad)
-    }
+    /// 持仓市值结构:按市值降序(扇区与图例从大到小,配色与顺序对应)
+    private var holdingsByValue: [HoldingSnapshot] { snapshot.holdings.sorted { $0.marketValue > $1.marketValue } }
     var body: some View {
         ScrollView { VStack(alignment: .leading, spacing: 20) {
             HStack {
@@ -93,6 +85,7 @@ struct DashboardView: View {
                     if holdings.isEmpty {
                         ContentUnavailableView("暂无持仓", systemImage: "tray", description: Text("录入买入记录后，这里会展示当前持有仓位。"))
                     } else {
+                        let total = displayHoldings.reduce(Decimal.zero) { $0 + $1.marketValue }
                         VStack(spacing: 0) {
                             List {
                                 HStack {
@@ -101,6 +94,7 @@ struct DashboardView: View {
                                     Text("现价").frame(maxWidth: .infinity, alignment: .trailing)
                                     Text("平均成本").frame(maxWidth: .infinity, alignment: .trailing)
                                     Text("现值").frame(maxWidth: .infinity, alignment: .trailing)
+                                    Text("比例").frame(width: 56, alignment: .trailing)
                                     Text("涨/跌幅").frame(maxWidth: .infinity, alignment: .trailing)
                                 }
                                 .font(.caption).foregroundStyle(.secondary)
@@ -113,6 +107,9 @@ struct DashboardView: View {
                                         Text(item.hasValidPrice ? USDFormat.string(item.currentPrice!) : "—").frame(maxWidth: .infinity, alignment: .trailing)
                                         Text(USDFormat.string(item.averageCost)).frame(maxWidth: .infinity, alignment: .trailing)
                                         Text(item.hasValidPrice ? USDFormat.string(item.marketValue) : "—").frame(maxWidth: .infinity, alignment: .trailing)
+                                        Text(item.hasValidPrice && total > 0 ? (item.marketValue / total).formatted(.percent.precision(.fractionLength(1))) : "—")
+                                            .frame(width: 56, alignment: .trailing)
+                                            .foregroundStyle(.secondary)
                                         Text(item.changePercent.map { $0.formatted(.percent.precision(.fractionLength(2))) } ?? "—")
                                             .frame(maxWidth: .infinity, alignment: .trailing)
                                             .foregroundStyle(item.changePercent.map { $0 >= 0 ? Color.red : Color.green } ?? .secondary)
@@ -123,78 +120,12 @@ struct DashboardView: View {
                                 .onMove(perform: moveHolding)
                             }
                             .listStyle(.plain)
-                            .frame(height: 220)
+                            .frame(height: min(max(84, 30 + CGFloat(displayHoldings.count) * 24), 230))
                             .scrollContentBackground(.hidden)
-                            Text("拖动左侧手柄可调整排序。").font(.caption).foregroundStyle(.tertiary).padding(.top, 4)
                         }
                     }
                 }
-                GroupBox("持仓市值结构") { VStack(alignment: .leading, spacing: 12) { Chart(snapshot.holdings) { item in SectorMark(angle: .value("市值", NSDecimalNumber(decimal: item.marketValue).doubleValue), innerRadius: .ratio(0.62), angularInset: 1.5).foregroundStyle(by: .value("代码", item.symbol)).cornerRadius(3) }.chartForegroundStyleScale(range: Color.schwabPalette).chartLegend(.hidden).frame(height: 220); VStack(spacing: 6) { ForEach(Array(snapshot.holdings.enumerated()), id: \.element.id) { index, item in HStack(spacing: 8) { Circle().fill(Color.schwabPalette[index % Color.schwabPalette.count]).frame(width: 8, height: 8); Text(item.symbol); Spacer(); Text(USDFormat.string(item.marketValue)).monospacedDigit(); Text(item.weight, format: .percent.precision(.fractionLength(1))).monospacedDigit().foregroundStyle(.secondary).frame(width: 52, alignment: .trailing) } } }; if !snapshot.missingPriceSymbols.isEmpty { Label("缺少有效价格，已排除：\(snapshot.missingPriceSymbols.joined(separator: ", "))", systemImage: "exclamationmark.triangle").foregroundStyle(.orange) } } }
-                GroupBox("组合曲线") { VStack(alignment: .leading, spacing: 10) {
-                    if curvePoints.isEmpty {
-                        ContentUnavailableView("基准暂不可计算", systemImage: "chart.line.uptrend.xyaxis", description: Text(spyStatus))
-                    } else {
-                        HStack(alignment: .firstTextBaseline, spacing: 28) {
-                            if let last = curvePoints.last, let pr = last.portfolioReturn {
-                                HStack(spacing: 8) {
-                                    RoundedRectangle(cornerRadius: 1.5).fill(Color.schwabBlue).frame(width: 3, height: 30)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text("组合").font(.caption).foregroundStyle(.secondary)
-                                        Text(pr.formatted(.percent.precision(.fractionLength(2)))).font(.title3.bold().monospacedDigit()).foregroundStyle(pr >= 0 ? Color.red : Color.green)
-                                    }
-                                }
-                            }
-                            if let last = curvePoints.last {
-                                HStack(spacing: 8) {
-                                    RoundedRectangle(cornerRadius: 1.5).fill(Color(nsColor: .tertiaryLabelColor)).frame(width: 3, height: 30)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text("SPY 基准").font(.caption).foregroundStyle(.secondary)
-                                        Text(last.benchmarkReturn.formatted(.percent.precision(.fractionLength(2)))).font(.title3.monospacedDigit()).foregroundStyle(.secondary)
-                                    }
-                                }
-                            }
-                            Spacer()
-                            if let first = curvePoints.first, let last = curvePoints.last {
-                                Text("\(first.date.formatted(.dateTime.year().month())) – \(last.date.formatted(.dateTime.year().month()))").font(.caption).foregroundStyle(.tertiary)
-                            }
-                        }
-                        Chart {
-                            RuleMark(y: .value("零线", 0)).foregroundStyle(Color.primary.opacity(0.1)).lineStyle(StrokeStyle(lineWidth: 1))
-                            ForEach(curvePoints) { point in
-                                LineMark(x: .value("月份", point.date, unit: .month), y: .value("收益率", NSDecimalNumber(decimal: point.benchmarkReturn).doubleValue))
-                                    .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
-                                    .lineStyle(StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
-                            }
-                            ForEach(curvePoints.filter { $0.portfolioReturn != nil }) { point in
-                                LineMark(x: .value("月份", point.date, unit: .month), y: .value("收益率", NSDecimalNumber(decimal: point.portfolioReturn!).doubleValue))
-                                    .foregroundStyle(Color.schwabBlue)
-                                    .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
-                            }
-                            if curvePoints.count <= 24 {
-                                ForEach(curvePoints.filter { $0.portfolioReturn != nil }) { point in
-                                    PointMark(x: .value("月份", point.date, unit: .month), y: .value("收益率", NSDecimalNumber(decimal: point.portfolioReturn!).doubleValue))
-                                        .foregroundStyle(Color.schwabBlue).symbolSize(12)
-                                }
-                            }
-                            if let last = curvePoints.last {
-                                PointMark(x: .value("月份", last.date, unit: .month), y: .value("收益率", NSDecimalNumber(decimal: last.benchmarkReturn).doubleValue))
-                                    .foregroundStyle(Color(nsColor: .tertiaryLabelColor)).symbolSize(36)
-                                if let pr = last.portfolioReturn {
-                                    PointMark(x: .value("月份", last.date, unit: .month), y: .value("收益率", NSDecimalNumber(decimal: pr).doubleValue))
-                                        .foregroundStyle(Color.schwabBlue).symbolSize(36)
-                                }
-                            }
-                        }
-                        .chartYScale(domain: curveDomain)
-                        .chartXAxis { AxisMarks(values: .automatic(desiredCount: 8)) { AxisTick(); AxisValueLabel(format: .dateTime.year(.twoDigits).month(.abbreviated)) } }
-                        .chartYAxis { AxisMarks(values: .automatic(desiredCount: 5)) { AxisGridLine().foregroundStyle(Color.primary.opacity(0.06)); AxisValueLabel(format: Decimal.FormatStyle.Percent.percent.scale(1)) } }
-                        .chartLegend(.hidden)
-                        .frame(height: 230)
-                        if !curveMissing.isEmpty { Text("以下标的缺历史行情，按投入成本计入组合曲线：\(curveMissing.joined(separator: ", "))").font(.caption).foregroundStyle(.orange) }
-                        Text("组合收益 =（持仓市值 + 累计卖出回款）÷ 累计投入 − 1；历史月份用各标的历史收盘价合成，不伪造缺失行情。").font(.caption).foregroundStyle(.secondary)
-                        Text(spyStatus).font(.caption).foregroundStyle(.secondary)
-                    }
-                } }
+                GroupBox("持仓市值结构") { VStack(alignment: .leading, spacing: 12) { Chart(holdingsByValue) { item in SectorMark(angle: .value("市值", NSDecimalNumber(decimal: item.marketValue).doubleValue), innerRadius: .ratio(0.62), angularInset: 1.5).foregroundStyle(by: .value("代码", item.symbol)).cornerRadius(3) }.chartForegroundStyleScale(range: Color.schwabPalette).chartLegend(.hidden).frame(height: 220); VStack(spacing: 6) { ForEach(Array(holdingsByValue.enumerated()), id: \.element.id) { index, item in HStack(spacing: 8) { Circle().fill(Color.schwabPalette[index % Color.schwabPalette.count]).frame(width: 8, height: 8); Text(item.symbol); Spacer(); Text(USDFormat.string(item.marketValue)).monospacedDigit(); Text(item.weight, format: .percent.precision(.fractionLength(1))).monospacedDigit().foregroundStyle(.secondary).frame(width: 52, alignment: .trailing) } } }; if !snapshot.missingPriceSymbols.isEmpty { Label("缺少有效价格，已排除：\(snapshot.missingPriceSymbols.joined(separator: ", "))", systemImage: "exclamationmark.triangle").foregroundStyle(.orange) } } }
                 GroupBox("月度投入") { Chart(snapshot.monthlyContributions) { BarMark(x: .value("月份", $0.month, unit: .month), y: .value("投入", NSDecimalNumber(decimal: $0.amount).doubleValue)).foregroundStyle(Color.schwabBlue).cornerRadius(3) }.chartXAxis { AxisMarks(values: .stride(by: .month)) { AxisGridLine(); AxisTick(); AxisValueLabel(format: .dateTime.year().month(.abbreviated)) } }.frame(height: 180) }
                 GroupBox("券商账户持仓") {
                     if snapshot.accountHoldings.isEmpty {
@@ -212,33 +143,14 @@ struct DashboardView: View {
                     }
                 }
             }
-        }.padding(24) }.task { syncReport(); await refreshSPY(); await buildCurve() }
+        }.padding(24) }.task { syncReport() }
       .fileExporter(isPresented: $exporting, document: document, contentType: .plainText, defaultFilename: exportName) { _ in }
     }
     @MainActor private func refresh() async {
         refreshing = true
         defer { refreshing = false }
         await refreshQuotes()
-        await refreshSPY()
-        await buildCurve()
         syncReport()
-    }
-    /// 拉取全部持仓标的历史日线(带缓存),按月合成组合真实历史收益曲线。
-    @MainActor private func buildCurve() async {
-        let symbols = Set((purchases.compactMap { $0.investment?.symbol }) + (sales.compactMap { $0.investment?.symbol })).filter { !$0.isEmpty }
-        guard !symbols.isEmpty else { curvePoints = []; return }
-        let cache = try? HistoricalQuoteCache()
-        var prices: [String: [HistoricalPrice]] = [:]
-        if let key = try? KeychainAPIKeyStore().read(), !key.isEmpty, let cache {
-            let service = HistoricalQuoteService(source: TwelveDataSource(), cache: cache)
-            for symbol in symbols { let result = await service.refresh(symbol: symbol, apiKey: key); prices[symbol] = result.prices }
-        } else if let cache {
-            for symbol in symbols { prices[symbol] = cache.load(symbol: symbol) }
-        }
-        if let result = BenchmarkDashboard.curveWithPortfolio(purchases: purchases, sales: sales, spyPrices: spyPrices, portfolioPrices: prices, currentPortfolioValue: marketValue) {
-            curvePoints = result.points
-            curveMissing = result.missingSymbols
-        }
     }
     private func syncReport() {
         holdings = PositionReportService.holdings(investments: investments, purchases: purchases, sales: sales)
@@ -257,7 +169,6 @@ struct DashboardView: View {
         for item in investments where item.isWatched { do { let quote = try await coordinator.quote(symbol: item.symbol, apiKey: key); item.latestPrice = quote.price; item.previousClose = quote.previousClose; item.quoteUpdatedAt = quote.timestamp; success += 1 } catch { failures.append("\(item.symbol): \(error.localizedDescription)") } }
         if success > 0 { try? context.save() }; quoteStatus = failures.isEmpty ? "已更新 \(success) 个标的行情" : "更新 \(success) 个；失败：\(failures.joined(separator: "，"))"
     }
-    @MainActor private func refreshSPY() async { guard let key = try? KeychainAPIKeyStore().read(), !key.isEmpty, let cache = try? HistoricalQuoteCache() else { spyStatus = "保存 Twelve Data Key 后可加载 SPY；已有缓存仍可离线使用"; if let cache = try? HistoricalQuoteCache() { spyPrices = cache.load(symbol: "SPY") }; return }; let result = await HistoricalQuoteService(source: TwelveDataSource(), cache: cache).refresh(symbol: "SPY", apiKey: key); spyPrices = result.prices; spyStatus = result.error.map { "网络失败，使用缓存（\(spyPrices.last?.date.formatted(date: .abbreviated, time: .omitted) ?? "无缓存")）：\($0)" } ?? "SPY 更新：\(spyPrices.last?.date.formatted(date: .abbreviated, time: .omitted) ?? "无数据")" }
 }
 
 struct MetricCard: View {
