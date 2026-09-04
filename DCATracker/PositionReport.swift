@@ -75,7 +75,7 @@ enum PositionReportService {
                 let value = item.hasValidPrice ? USDFormat.string(item.marketValue) : "-"
                 let pl = item.hasValidPrice ? USDFormat.string(item.unrealizedPL) : "-"
                 let change = item.changePercent.map { $0.formatted(.percent.precision(.fractionLength(2))) } ?? "-"
-                lines.append("| \(item.symbol) | \(item.quantity.formatted()) | \(USDFormat.string(item.averageCost)) | \(price) | \(value) | \(pl) | \(change) |")
+                lines.append("| \(item.symbol) | \(item.quantity.formatted(.number.precision(.fractionLength(2)))) | \(USDFormat.string(item.averageCost)) | \(price) | \(value) | \(pl) | \(change) |")
             }
         }
         if !missingSymbols.isEmpty {

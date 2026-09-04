@@ -103,7 +103,7 @@ struct DashboardView: View {
                                 ForEach(displayHoldings) { item in
                                     HStack {
                                         Text(item.symbol).fontWeight(.medium).frame(maxWidth: .infinity, alignment: .leading)
-                                        Text("\(item.quantity.formatted(.number.precision(.fractionLength(0...6))))").frame(maxWidth: .infinity, alignment: .trailing)
+                                        Text(item.quantity.formatted(.number.precision(.fractionLength(2)))).frame(maxWidth: .infinity, alignment: .trailing)
                                         Text(item.hasValidPrice ? USDFormat.string(item.currentPrice!) : "—").frame(maxWidth: .infinity, alignment: .trailing)
                                         Text(USDFormat.string(item.averageCost)).frame(maxWidth: .infinity, alignment: .trailing)
                                         Text(item.hasValidPrice ? USDFormat.string(item.marketValue) : "—").frame(maxWidth: .infinity, alignment: .trailing)
@@ -294,7 +294,7 @@ struct TransactionLedgerView: View {
     }
     var body: some View { VStack {
         HStack { Button("新增投资记录", systemImage: "plus") { adding = true }.buttonStyle(.borderedProminent).disabled(accounts.isEmpty || investments.isEmpty); Picker("类型", selection: $selectedType) { Text("全部").tag("all"); Text("买入").tag("buy"); Text("卖出").tag("sell"); Text("股息").tag("dividend") }.frame(width: 180); Button(selectedRecordIDs.count == records.count && !records.isEmpty ? "取消全选" : "全选") { toggleSelectAll() }.disabled(records.isEmpty); Spacer(); Button("导出选中") { exportSelected() }.disabled(selectedRecordIDs.isEmpty); Button("删除选中", role: .destructive) { confirmingBatchDelete = true }.disabled(selectedRecordIDs.isEmpty); Button("导出 CSV") { exportCSV(records, name: "DCA-Tracker-ledger") }; Button("导出完整 JSON") { exportBackup() } }.padding()
-        if accounts.isEmpty || investments.isEmpty { ContentUnavailableView("先完成基础设置", systemImage: "tray", description: Text("请先添加至少一个券商账户和投资标的。")) } else if records.isEmpty { ContentUnavailableView("还没有投资记录", systemImage: "list.bullet.rectangle", description: Text("点击左上角“新增投资记录”手动录入买入、卖出或股息。")) } else { Table(records, selection: $selectedRecordIDs) { TableColumn("类型", value: \.type); TableColumn("日期") { Text($0.date, format: .dateTime.year().month().day()) }; TableColumn("标的", value: \.symbol); TableColumn("数量") { record in Text(record.quantity.map { "\($0.formatted(.number.precision(.fractionLength(0...6)))) 股" } ?? "—") }; TableColumn("账户", value: \.account); TableColumn("金额") { Text(USDFormat.string($0.amount)) }; TableColumn("操作") { record in HStack { Button("编辑") { editing = record }; Button("删除", role: .destructive) { pendingDelete = record } } } } }
+        if accounts.isEmpty || investments.isEmpty { ContentUnavailableView("先完成基础设置", systemImage: "tray", description: Text("请先添加至少一个券商账户和投资标的。")) } else if records.isEmpty { ContentUnavailableView("还没有投资记录", systemImage: "list.bullet.rectangle", description: Text("点击左上角“新增投资记录”手动录入买入、卖出或股息。")) } else { Table(records, selection: $selectedRecordIDs) { TableColumn("类型", value: \.type); TableColumn("日期") { Text($0.date, format: .dateTime.year().month().day()) }; TableColumn("标的", value: \.symbol); TableColumn("数量") { record in Text(record.quantity.map { "\($0.formatted(.number.precision(.fractionLength(2)))) 股" } ?? "—") }; TableColumn("账户", value: \.account); TableColumn("金额") { Text(USDFormat.string($0.amount)) }; TableColumn("操作") { record in HStack { Button("编辑") { editing = record }; Button("删除", role: .destructive) { pendingDelete = record } } } } }
         if !message.isEmpty { Text(message).foregroundStyle(message.contains("失败") ? .red : .secondary).padding() }
     }.navigationTitle("交易台账")
       .fileExporter(isPresented: $exporting, document: document, contentType: exportType, defaultFilename: exportName) { message = $0.isSuccess ? "导出成功" : "导出失败" }
@@ -338,7 +338,7 @@ struct TransactionEntrySheet: View {
             if buyByAmount {
                 TextField("购买金额（美元）", value: $amountUSD, format: .number)
                 TextField("购入价（美元/股）", value: $second, format: .number)
-                if second > 0 { Text("约 \(derivedShares.formatted(.number.precision(.fractionLength(0...6)))) 股").font(.caption).foregroundStyle(.secondary) }
+                if second > 0 { Text("约 \(derivedShares.formatted(.number.precision(.fractionLength(2)))) 股").font(.caption).foregroundStyle(.secondary) }
             } else {
                 TextField("股数", value: $first, format: .number)
                 TextField("购入价（美元/股）", value: $second, format: .number)
