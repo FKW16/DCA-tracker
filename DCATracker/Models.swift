@@ -134,3 +134,18 @@ struct TransactionFilter {
         selectedTagIDs.isEmpty || tags.contains { selectedTagIDs.contains($0.id) }
     }
 }
+
+enum AccountPreference {
+    /// 录入和计划确认优先落到未归档的嘉信账户，否则使用第一个未归档账户。
+    static func preferredTradingAccount(_ accounts: [BrokerageAccount]) -> BrokerageAccount? {
+        let active = accounts.filter { !$0.isArchived }
+        return active.first(where: isPreferredBroker) ?? active.first
+    }
+
+    private static func isPreferredBroker(_ account: BrokerageAccount) -> Bool {
+        let name = account.name
+        return name.localizedCaseInsensitiveContains("嘉信")
+            || name.localizedCaseInsensitiveContains("schwab")
+            || name.localizedCaseInsensitiveContains("charles")
+    }
+}

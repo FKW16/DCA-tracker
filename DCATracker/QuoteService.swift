@@ -118,6 +118,39 @@ actor QuoteCoordinator {
     }
 }
 
+struct QuoteRefreshOutcome: Equatable, Sendable {
+    var updated = 0
+    var skipped = 0
+    var failures: [String] = []
+}
+
+@MainActor
+enum WatchedQuoteRefresh {
+    /// 自动刷新跳过这个时间窗内已经成功的行情，避免来回切页打满免费额度。
+    static let automaticInterval: TimeInterval = 5 * 60
+
+    static func apply(to investments: [Investment], apiKey: String, coordinator: QuoteCoordinator, minimumInterval: TimeInterval?) async -> QuoteRefreshOutcome {
+        var outcome = QuoteRefreshOutcome()
+        let now = Date()
+        for item in investments where item.isWatched {
+            if let minimumInterval, let updatedAt = item.quoteUpdatedAt, now.timeIntervalSince(updatedAt) < minimumInterval {
+                outcome.skipped += 1
+                continue
+            }
+            do {
+                let quote = try await coordinator.quote(symbol: item.symbol, apiKey: apiKey)
+                item.latestPrice = quote.price
+                item.previousClose = quote.previousClose
+                item.quoteUpdatedAt = quote.timestamp
+                outcome.updated += 1
+            } catch {
+                outcome.failures.append("\(item.symbol): \(error.localizedDescription)")
+            }
+        }
+        return outcome
+    }
+}
+
 enum EffectiveQuote: Equatable { case live(MarketQuote), cache(MarketQuote), manual(Decimal), unavailable }
 enum QuoteFallback {
     static func resolve(live: Result<MarketQuote, Error>, cached: MarketQuote?, manual: Decimal?) -> EffectiveQuote {

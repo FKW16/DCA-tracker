@@ -22,6 +22,16 @@ final class ExportServiceTests: XCTestCase {
         _ = sourceContext
     }
     private let record = LedgerRecord(id: UUID(), type: "buy", date: Date(timeIntervalSince1970: 0), symbol: "VTI", account: "Broker", quantity: 1, price: 10, amount: 10, tags: ["定投"], note: "a,b")
+    func testEditSeedKeepsBuyFeeAndDividendAmounts() {
+        let buy = LedgerRecord(id: UUID(), type: "买入", date: Date(timeIntervalSince1970: 0), symbol: "VTI", account: "Broker", quantity: 2, price: 10, amount: 21, tags: [], note: "", fee: 1)
+        XCTAssertEqual(buy.editAmounts.first, 2)
+        XCTAssertEqual(buy.editAmounts.second, 10)
+        XCTAssertEqual(buy.editAmounts.third, 1)
+        let dividend = LedgerRecord(id: UUID(), type: "股息", date: Date(timeIntervalSince1970: 0), symbol: "VTI", account: "Broker", quantity: nil, price: nil, amount: 85, tags: [], note: "", grossAmount: 100, withholdingTax: 15, receivedAmount: 85)
+        XCTAssertEqual(dividend.editAmounts.first, 100)
+        XCTAssertEqual(dividend.editAmounts.second, 15)
+        XCTAssertEqual(dividend.editAmounts.third, 85)
+    }
     func testCSVIncludesReadableLedgerAndEscapesComma() {
         let text = String(data: ExportService.csv([record]), encoding: .utf8)!
         XCTAssertTrue(text.contains("type,date,symbol")); XCTAssertTrue(text.contains("\"a,b\"")); XCTAssertTrue(text.contains("VTI"))

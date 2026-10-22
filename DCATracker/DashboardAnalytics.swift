@@ -82,12 +82,25 @@ enum DashboardAnalytics {
 }
 
 enum USDFormat {
+    private static let lock = NSLock()
+    private static var formatters: [String: NumberFormatter] = [:]
+
     static func string(_ value: Decimal, locale: Locale = Locale(identifier: "en_US")) -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return "\(formatter(for: locale).string(from: value as NSDecimalNumber) ?? "0.00") $"
+    }
+
+    /// Caller must hold `lock`. NumberFormatter is not thread-safe, so formatting stays inside the same lock.
+    private static func formatter(for locale: Locale) -> NumberFormatter {
+        let key = locale.identifier
+        if let formatter = formatters[key] { return formatter }
         let formatter = NumberFormatter()
         formatter.locale = locale
         formatter.numberStyle = .decimal
         formatter.minimumFractionDigits = 2
         formatter.maximumFractionDigits = 2
-        return "\(formatter.string(from: value as NSDecimalNumber) ?? "0.00") $"
+        formatters[key] = formatter
+        return formatter
     }
 }

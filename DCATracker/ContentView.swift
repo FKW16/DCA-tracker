@@ -29,6 +29,23 @@ private enum NavigationItem: String, CaseIterable, Identifiable {
     var icon: String { ["overview": "chart.xyaxis.line", "portfolios": "calendar.badge.clock", "accounts": "building.columns", "investments": "briefcase", "transactions": "arrow.left.arrow.right", "settings": "gearshape"][rawValue]! }
 }
 
+private func orderedUnique(_ values: [String]) -> [String] {
+    var seen = Set<String>()
+    return values.filter { seen.insert($0).inserted }
+}
+
+extension View {
+    /// 扇区颜色按传入顺序对应，避免图例和 Swift Charts 的默认分类顺序错位。
+    @ViewBuilder func schwabCategoryScale(_ categories: [String]) -> some View {
+        let unique = orderedUnique(categories)
+        if unique.isEmpty {
+            self
+        } else {
+            self.chartForegroundStyleScale(domain: unique, range: unique.indices.map { Color.schwabPalette[$0 % Color.schwabPalette.count] })
+        }
+    }
+}
+
 extension Color {
     /// 嘉信理财风格主色:沉稳深蓝
     static let schwabBlue = Color(red: 0.00, green: 0.36, blue: 0.63)
@@ -50,18 +67,32 @@ struct DashboardView: View {
     @Query private var purchases: [Purchase]
     @Query private var sales: [Sale]
     @State private var refreshing = false; @State private var quoteStatus = ""
-    @State private var holdings: [PositionHolding] = []
     @AppStorage("dashboardHoldingOrder") private var holdingOrder = ""
     @State private var exporting = false; @State private var document = ExportDocument(); @State private var exportName = "DCA-Tracker-holdings-report"; @State private var autoReportPath = ""
     private let coordinator = QuoteCoordinator(source: TwelveDataSource())
     private var snapshot: DashboardSnapshot { DashboardAnalytics.snapshot(investments: investments, purchases: purchases, sales: sales) }
-    private var invested: Decimal { purchases.reduce(0) { $0 + $1.quantity * $1.price + $1.fee } }
-    private var marketValue: Decimal { snapshot.marketValue }
+    private var liveHoldings: [PositionHolding] { PositionReportService.holdings(investments: investments, purchases: purchases, sales: sales) }
+    private var pricedHoldings: [PositionHolding] { liveHoldings.filter(\.hasValidPrice) }
+    private var positionCost: Decimal { pricedHoldings.reduce(0) { $0 + $1.totalCost } }
+    private var marketValue: Decimal { pricedHoldings.reduce(0) { $0 + $1.marketValue } }
+    private var grossBuys: Decimal { purchases.reduce(0) { $0 + $1.quantity * $1.price + $1.fee } }
+    private var saleProceeds: Decimal { sales.reduce(0) { $0 + $1.quantity * $1.price - $1.fee } }
     private var displayHoldings: [PositionHolding] {
         let saved = holdingOrder.split(separator: ",").map(String.init)
         var rank: [String: Int] = [:]
         for (index, symbol) in saved.enumerated() { rank[symbol] = index }
-        return holdings.sorted { (rank[$0.symbol] ?? Int.max, $0.symbol) < (rank[$1.symbol] ?? Int.max, $1.symbol) }
+        return liveHoldings.sorted { (rank[$0.symbol] ?? Int.max, $0.symbol) < (rank[$1.symbol] ?? Int.max, $1.symbol) }
+    }
+    private var summaryCaption: String? {
+        var parts: [String] = []
+        if grossBuys != positionCost || saleProceeds != 0 {
+            parts.append("累计买入 \(USDFormat.string(grossBuys))")
+            if saleProceeds != 0 { parts.append("卖出回款 \(USDFormat.string(saleProceeds))") }
+        }
+        if !snapshot.missingPriceSymbols.isEmpty {
+            parts.append("缺价未计入：\(snapshot.missingPriceSymbols.joined(separator: ", "))")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
     /// 持仓市值结构:按市值降序(扇区与图例从大到小,配色与顺序对应)
     private var holdingsByValue: [HoldingSnapshot] { snapshot.holdings.sorted { $0.marketValue > $1.marketValue } }
@@ -79,10 +110,17 @@ struct DashboardView: View {
             }
             if !quoteStatus.isEmpty { Text(quoteStatus).font(.caption).foregroundStyle(.secondary) }
             if !autoReportPath.isEmpty { Label("报告已自动同步：\(autoReportPath)", systemImage: "checkmark.circle").font(.caption).foregroundStyle(.secondary) }
-            HStack { MetricCard(title: "累计投入", value: invested); MetricCard(title: "当前市值", value: marketValue); MetricCard(title: "浮动差额", value: marketValue - invested) }
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    MetricCard(title: "持仓成本", value: positionCost)
+                    MetricCard(title: "当前市值", value: marketValue)
+                    MetricCard(title: "浮动盈亏", value: marketValue - positionCost, tint: profitTint(marketValue - positionCost))
+                }
+                if let summaryCaption { Text(summaryCaption).font(.caption).foregroundStyle(.secondary) }
+            }
             if investments.isEmpty { ContentUnavailableView("还没有投资标的", systemImage: "chart.pie", description: Text("请先添加账户和标的，再到交易台账手动新增记录。")) } else {
                 GroupBox("持有仓位") {
-                    if holdings.isEmpty {
+                    if liveHoldings.isEmpty {
                         ContentUnavailableView("暂无持仓", systemImage: "tray", description: Text("录入买入记录后，这里会展示当前持有仓位。"))
                     } else {
                         let total = displayHoldings.reduce(Decimal.zero) { $0 + $1.marketValue }
@@ -120,12 +158,12 @@ struct DashboardView: View {
                                 .onMove(perform: moveHolding)
                             }
                             .listStyle(.plain)
-                            .frame(height: min(max(84, 30 + CGFloat(displayHoldings.count) * 24), 230))
+                            .frame(height: max(88, 36 + CGFloat(displayHoldings.count) * 32))
                             .scrollContentBackground(.hidden)
                         }
                     }
                 }
-                GroupBox("持仓市值结构") { VStack(alignment: .leading, spacing: 12) { Chart(holdingsByValue) { item in SectorMark(angle: .value("市值", NSDecimalNumber(decimal: item.marketValue).doubleValue), innerRadius: .ratio(0.62), angularInset: 1.5).foregroundStyle(by: .value("代码", item.symbol)).cornerRadius(3) }.chartForegroundStyleScale(range: Color.schwabPalette).chartLegend(.hidden).frame(height: 220); VStack(spacing: 6) { ForEach(Array(holdingsByValue.enumerated()), id: \.element.id) { index, item in HStack(spacing: 8) { Circle().fill(Color.schwabPalette[index % Color.schwabPalette.count]).frame(width: 8, height: 8); Text(item.symbol); Spacer(); Text(USDFormat.string(item.marketValue)).monospacedDigit(); Text(item.weight, format: .percent.precision(.fractionLength(1))).monospacedDigit().foregroundStyle(.secondary).frame(width: 52, alignment: .trailing) } } }; if !snapshot.missingPriceSymbols.isEmpty { Label("缺少有效价格，已排除：\(snapshot.missingPriceSymbols.joined(separator: ", "))", systemImage: "exclamationmark.triangle").foregroundStyle(.orange) } } }
+                GroupBox("持仓市值结构") { VStack(alignment: .leading, spacing: 12) { Chart(holdingsByValue) { item in SectorMark(angle: .value("市值", NSDecimalNumber(decimal: item.marketValue).doubleValue), innerRadius: .ratio(0.62), angularInset: 1.5).foregroundStyle(by: .value("代码", item.symbol)).cornerRadius(3) }.schwabCategoryScale(holdingsByValue.map(\.symbol)).chartLegend(.hidden).frame(height: 220); VStack(spacing: 6) { ForEach(Array(holdingsByValue.enumerated()), id: \.element.id) { index, item in HStack(spacing: 8) { Circle().fill(Color.schwabPalette[index % Color.schwabPalette.count]).frame(width: 8, height: 8); Text(item.symbol); Spacer(); Text(USDFormat.string(item.marketValue)).monospacedDigit(); Text(item.weight, format: .percent.precision(.fractionLength(1))).monospacedDigit().foregroundStyle(.secondary).frame(width: 52, alignment: .trailing) } } }; if !snapshot.missingPriceSymbols.isEmpty { Label("缺少有效价格，已排除：\(snapshot.missingPriceSymbols.joined(separator: ", "))", systemImage: "exclamationmark.triangle").foregroundStyle(.orange) } } }
                 GroupBox("月度投入") { Chart(snapshot.monthlyContributions) { BarMark(x: .value("月份", $0.month, unit: .month), y: .value("投入", NSDecimalNumber(decimal: $0.amount).doubleValue)).foregroundStyle(Color.schwabBlue).cornerRadius(3) }.chartXAxis { AxisMarks(values: .stride(by: .month)) { AxisGridLine(); AxisTick(); AxisValueLabel(format: .dateTime.year().month(.abbreviated)) } }.frame(height: 180) }
                 GroupBox("券商账户持仓") {
                     if snapshot.accountHoldings.isEmpty {
@@ -135,7 +173,7 @@ struct DashboardView: View {
                             Chart(snapshot.accountHoldings) { item in
                                 SectorMark(angle: .value("市值", NSDecimalNumber(decimal: item.marketValue).doubleValue), innerRadius: .ratio(0.62), angularInset: 1.5)
                                     .foregroundStyle(by: .value("账户", item.accountName)).cornerRadius(3)
-                            }.chartForegroundStyleScale(range: Color.schwabPalette).chartLegend(.hidden).frame(height: 220)
+                            }.schwabCategoryScale(snapshot.accountHoldings.map(\.accountName)).chartLegend(.hidden).frame(height: 220)
                             VStack(spacing: 6) { ForEach(Array(snapshot.accountHoldings.enumerated()), id: \.element.id) { index, item in
                                 HStack(spacing: 8) { Circle().fill(Color.schwabPalette[index % Color.schwabPalette.count]).frame(width: 8, height: 8); Text(item.accountName); Spacer(); Text(USDFormat.string(item.marketValue)).monospacedDigit(); Text(item.weight, format: .percent.precision(.fractionLength(1))).monospacedDigit().foregroundStyle(.secondary).frame(width: 52, alignment: .trailing) }
                             } }
@@ -153,10 +191,14 @@ struct DashboardView: View {
         syncReport()
     }
     private func syncReport() {
-        holdings = PositionReportService.holdings(investments: investments, purchases: purchases, sales: sales)
-        let text = PositionReportService.markdown(holdings: displayHoldings, invested: invested, marketValue: marketValue, missingSymbols: snapshot.missingPriceSymbols)
+        let text = PositionReportService.markdown(holdings: displayHoldings, positionCost: positionCost, marketValue: marketValue, missingSymbols: snapshot.missingPriceSymbols)
         document = ExportDocument(data: Data(text.utf8))
         autoReportPath = PositionReportService.writeAutoReport(text)?.path ?? ""
+    }
+    private func profitTint(_ value: Decimal) -> Color? {
+        if value > 0 { return .red }
+        if value < 0 { return .green }
+        return nil
     }
     private func moveHolding(from source: IndexSet, to destination: Int) {
         var items = displayHoldings
@@ -165,19 +207,20 @@ struct DashboardView: View {
     }
     @MainActor private func refreshQuotes() async {
         guard let key = try? KeychainAPIKeyStore().read(), !key.isEmpty else { quoteStatus = "保存 Twelve Data Key 后可刷新行情"; return }
-        var success = 0; var failures: [String] = []
-        for item in investments where item.isWatched { do { let quote = try await coordinator.quote(symbol: item.symbol, apiKey: key); item.latestPrice = quote.price; item.previousClose = quote.previousClose; item.quoteUpdatedAt = quote.timestamp; success += 1 } catch { failures.append("\(item.symbol): \(error.localizedDescription)") } }
-        if success > 0 { try? context.save() }; quoteStatus = failures.isEmpty ? "已更新 \(success) 个标的行情" : "更新 \(success) 个；失败：\(failures.joined(separator: "，"))"
+        let outcome = await WatchedQuoteRefresh.apply(to: investments, apiKey: key, coordinator: coordinator, minimumInterval: nil)
+        if outcome.updated > 0 { try? context.save() }
+        quoteStatus = outcome.failures.isEmpty ? "已更新 \(outcome.updated) 个标的行情" : "更新 \(outcome.updated) 个；失败：\(outcome.failures.joined(separator: "，"))"
     }
 }
 
 struct MetricCard: View {
-    let title: String; let value: Decimal
+    let title: String; let value: Decimal; var tint: Color? = nil
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title).font(.subheadline).foregroundStyle(.secondary)
             Text(USDFormat.string(value))
                 .font(.title2.bold().monospacedDigit())
+                .foregroundStyle(tint ?? .primary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.65)
                 .allowsTightening(true)
@@ -200,7 +243,7 @@ struct PortfolioPlannerView: View {
         Section("本期建议") {
             if portfolios.isEmpty { Text("请先添加标的并创建 DCA 计划。") } else {
                 Button("生成本期建议") { calculate() }
-                if let suggestion { HStack(spacing: 12) { MetricCard(title: "预计花费", value: suggestion.estimatedSpend); MetricCard(title: "剩余现金", value: suggestion.remainingCash); MetricCard(title: "当前市值", value: suggestion.currentValue) }; ForEach(suggestion.assets, id: \.assetID) { item in HStack { Text(investments.first(where: { $0.id.uuidString == item.assetID })?.symbol ?? item.assetID); Spacer(); Text("\(Int(truncating: item.shares as NSDecimalNumber)) 股 · \(USDFormat.string(item.amount))"); Text("买后 \(item.postTradeWeight.formatted(.percent.precision(.fractionLength(1))))").foregroundStyle(.secondary) } }; Button("确认记为买入") { confirm(suggestion) }.disabled(accounts.isEmpty || suggestion.estimatedSpend <= 0) }
+                if let suggestion { HStack(spacing: 12) { MetricCard(title: "预计花费", value: suggestion.estimatedSpend); MetricCard(title: "剩余现金", value: suggestion.remainingCash); MetricCard(title: "当前市值", value: suggestion.currentValue) }; ForEach(suggestion.assets, id: \.assetID) { item in HStack { Text(investments.first(where: { $0.id.uuidString == item.assetID })?.symbol ?? item.assetID); Spacer(); Text("\(Int(truncating: item.shares as NSDecimalNumber)) 股 · \(USDFormat.string(item.amount))"); Text("买后 \(item.postTradeWeight.formatted(.percent.precision(.fractionLength(1))))").foregroundStyle(.secondary) } }; Button("确认记为买入") { confirm(suggestion) }.disabled(AccountPreference.preferredTradingAccount(accounts) == nil || suggestion.estimatedSpend <= 0) }
                 if !error.isEmpty { Text(error).foregroundStyle(.red) }
             }
         }
@@ -247,7 +290,7 @@ struct PortfolioPlannerView: View {
             error = String(describing: calculationError)
         }
     }
-    private func confirm(_ value: StrategySuggestion) { guard let p = portfolios.first, let plan = p.plans.first, let account = accounts.first else { error = "请先添加券商账户"; return }; _ = PlanningWorkflow.confirm(value, plan: plan, portfolio: p, account: account, context: context); try? context.save(); suggestion = nil }
+    private func confirm(_ value: StrategySuggestion) { guard let p = portfolios.first, let plan = p.plans.first, let account = AccountPreference.preferredTradingAccount(accounts) else { error = "请先添加未归档的券商账户"; return }; _ = PlanningWorkflow.confirm(value, plan: plan, portfolio: p, account: account, context: context); try? context.save(); suggestion = nil }
 }
 
 struct AccountsView: View {
@@ -261,9 +304,9 @@ struct InvestmentsView: View {
     @State private var symbol = ""; @State private var manual: Decimal?; @State private var status = ""; @State private var editing: Investment?; @State private var pendingDelete: Investment?
     private let coordinator = QuoteCoordinator(source: TwelveDataSource())
     var body: some View { Form {
-        Section("新增标的") { TextField("代码", text: $symbol); TextField("手工价格（美元，可选）", value: $manual, format: .number); Button("添加") { let item = Investment(symbol: symbol, name: symbol); item.manualPrice = manual; context.insert(item); try? context.save(); symbol = ""; manual = nil }.disabled(symbol.isEmpty); Button("刷新全部关注标的") { Task { await refresh() } }; Text(status).font(.caption).foregroundStyle(.secondary) }
+        Section("新增标的") { TextField("代码", text: $symbol); TextField("手工价格（美元，可选）", value: $manual, format: .number); Button("添加") { let item = Investment(symbol: symbol, name: symbol); item.manualPrice = manual; context.insert(item); try? context.save(); symbol = ""; manual = nil }.disabled(symbol.isEmpty); Button("刷新全部关注标的") { Task { await refresh(force: true) } }; Text(status).font(.caption).foregroundStyle(.secondary) }
         Section("行情（自动→缓存→手工）") { ForEach(investments) { item in HStack { VStack(alignment: .leading) { Text(item.symbol).font(.headline); Text(item.quoteUpdatedAt.map { "更新：\($0.formatted())" } ?? "尚无自动行情").font(.caption).foregroundStyle(.secondary) }; Spacer(); Text(USDFormat.string(item.latestPrice ?? item.manualPrice ?? 0)); Button("编辑") { editing = item }; Button("删除", role: .destructive) { pendingDelete = item } } } }
-    }.formStyle(.grouped).navigationTitle("投资标的").task { await refresh() }
+    }.formStyle(.grouped).navigationTitle("投资标的").task { await refresh(force: false) }
       .sheet(item: $editing) { item in InvestmentEditSheet(investment: item) { name, exchange, manual, watched in item.name = name; item.exchange = exchange; item.manualPrice = manual; item.isWatched = watched; try? context.save(); editing = nil } }
       .confirmationDialog("确定删除 \(pendingDelete?.symbol ?? "")？", isPresented: .init(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } })) {
           Button("删除标的及相关记录", role: .destructive) { if let item = pendingDelete { delete(item) }; pendingDelete = nil }
@@ -274,11 +317,17 @@ struct InvestmentsView: View {
         do { try InvestmentDeletionService.delete(investment, portfolioAssets: assets, context: context); status = "已删除 \(symbol)" }
         catch { status = "删除失败：\(error.localizedDescription)" }
     }
-    @MainActor private func refresh() async {
+    @MainActor private func refresh(force: Bool) async {
         guard let key = try? KeychainAPIKeyStore().read(), !key.isEmpty else { status = "请先在设置中保存 Twelve Data API Key"; return }
-        var success = 0; var failures: [String] = []
-        for item in investments where item.isWatched { do { let quote = try await coordinator.quote(symbol: item.symbol, apiKey: key); item.latestPrice = quote.price; item.previousClose = quote.previousClose; item.quoteUpdatedAt = quote.timestamp; success += 1 } catch { failures.append("\(item.symbol): \(error.localizedDescription)") } }
-        if success > 0 { try? context.save() }; status = failures.isEmpty ? "已更新 \(success) 个标的" : "更新 \(success) 个；失败：\(failures.joined(separator: "，"))"
+        let outcome = await WatchedQuoteRefresh.apply(to: investments, apiKey: key, coordinator: coordinator, minimumInterval: force ? nil : WatchedQuoteRefresh.automaticInterval)
+        if outcome.updated > 0 { try? context.save() }
+        if !force, outcome.updated == 0, outcome.failures.isEmpty, outcome.skipped > 0 {
+            status = "\(outcome.skipped) 个标的的行情仍在 5 分钟内，未重复请求"
+        } else if outcome.failures.isEmpty {
+            status = "已更新 \(outcome.updated) 个标的"
+        } else {
+            status = "更新 \(outcome.updated) 个；失败：\(outcome.failures.joined(separator: "，"))"
+        }
     }
 }
 
@@ -293,20 +342,20 @@ struct TransactionLedgerView: View {
         return (buys + sells + income).sorted { $0.date > $1.date }
     }
     var body: some View { VStack {
-        HStack { Button("新增投资记录", systemImage: "plus") { adding = true }.buttonStyle(.borderedProminent).disabled(accounts.isEmpty || investments.isEmpty); Picker("类型", selection: $selectedType) { Text("全部").tag("all"); Text("买入").tag("buy"); Text("卖出").tag("sell"); Text("股息").tag("dividend") }.frame(width: 180); Button(selectedRecordIDs.count == records.count && !records.isEmpty ? "取消全选" : "全选") { toggleSelectAll() }.disabled(records.isEmpty); Spacer(); Button("导出选中") { exportSelected() }.disabled(selectedRecordIDs.isEmpty); Button("删除选中", role: .destructive) { confirmingBatchDelete = true }.disabled(selectedRecordIDs.isEmpty); Button("导出 CSV") { exportCSV(records, name: "DCA-Tracker-ledger") }; Button("导出完整 JSON") { exportBackup() } }.padding()
+        HStack { Button("新增投资记录", systemImage: "plus") { adding = true }.buttonStyle(.borderedProminent).disabled(AccountPreference.preferredTradingAccount(accounts) == nil || investments.isEmpty); Picker("类型", selection: $selectedType) { Text("全部").tag("all"); Text("买入").tag("buy"); Text("卖出").tag("sell"); Text("股息").tag("dividend") }.frame(width: 180); Button(selectedRecordIDs.count == records.count && !records.isEmpty ? "取消全选" : "全选") { toggleSelectAll() }.disabled(records.isEmpty); Spacer(); Button("导出选中") { exportSelected() }.disabled(selectedRecordIDs.isEmpty); Button("删除选中", role: .destructive) { confirmingBatchDelete = true }.disabled(selectedRecordIDs.isEmpty); Button("导出 CSV") { exportCSV(records, name: "DCA-Tracker-ledger") }; Button("导出完整 JSON") { exportBackup() } }.padding()
         if accounts.isEmpty || investments.isEmpty { ContentUnavailableView("先完成基础设置", systemImage: "tray", description: Text("请先添加至少一个券商账户和投资标的。")) } else if records.isEmpty { ContentUnavailableView("还没有投资记录", systemImage: "list.bullet.rectangle", description: Text("点击左上角“新增投资记录”手动录入买入、卖出或股息。")) } else { Table(records, selection: $selectedRecordIDs) { TableColumn("类型", value: \.type); TableColumn("日期") { Text($0.date, format: .dateTime.year().month().day()) }; TableColumn("标的", value: \.symbol); TableColumn("数量") { record in Text(record.quantity.map { "\($0.formatted(.number.precision(.fractionLength(2)))) 股" } ?? "—") }; TableColumn("账户", value: \.account); TableColumn("金额") { Text(USDFormat.string($0.amount)) }; TableColumn("操作") { record in HStack { Button("编辑") { editing = record }; Button("删除", role: .destructive) { pendingDelete = record } } } } }
         if !message.isEmpty { Text(message).foregroundStyle(message.contains("失败") ? .red : .secondary).padding() }
     }.navigationTitle("交易台账")
       .fileExporter(isPresented: $exporting, document: document, contentType: exportType, defaultFilename: exportName) { message = $0.isSuccess ? "导出成功" : "导出失败" }
       .sheet(isPresented: $adding) { TransactionEntrySheet(accounts: accounts.filter { !$0.isArchived }, investments: investments) { draft in add(draft) } }
-      .sheet(item: $editing) { record in TransactionEditSheet(record: record, accounts: editAccounts(for: record)) { account, date, first, second, fee, note in applyEdit(record, account: account, date: date, first: first, second: second, fee: fee, note: note); editing = nil } }
+      .sheet(item: $editing) { record in TransactionEditSheet(record: record, accounts: editAccounts(for: record)) { account, date, first, second, fee, note in applyEdit(record, account: account, date: date, first: first, second: second, fee: fee, note: note) } }
       .confirmationDialog("确定删除这笔交易？", isPresented: .init(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } })) { Button("删除", role: .destructive) { if let record = pendingDelete { delete(record) }; pendingDelete = nil }; Button("取消", role: .cancel) {} }
       .confirmationDialog("确定删除选中的 \(selectedRecordIDs.count) 笔交易？", isPresented: $confirmingBatchDelete) { Button("删除选中交易", role: .destructive) { deleteSelected() }; Button("取消", role: .cancel) {} } message: { Text("此操作无法撤销。") }
       .onChange(of: selectedType) { _, _ in selectedRecordIDs.formIntersection(Set(records.map(\.id))) }
     }
-    private func buyRecord(_ value: Purchase) -> LedgerRecord? { guard TransactionFilter.matches(tags: value.tags, selectedTagIDs: selectedTagIDs) else { return nil }; return .init(id: value.id, type: "买入", date: value.date, symbol: value.investment?.symbol ?? "", account: value.account?.name ?? "", accountID: value.account?.id, quantity: value.quantity, price: value.price, amount: value.quantity * value.price + value.fee, tags: value.tags.map(\.name), note: value.note) }
-    private func saleRecord(_ value: Sale) -> LedgerRecord? { guard TransactionFilter.matches(tags: value.tags, selectedTagIDs: selectedTagIDs) else { return nil }; return .init(id: value.id, type: "卖出", date: value.date, symbol: value.investment?.symbol ?? "", account: value.account?.name ?? "", accountID: value.account?.id, quantity: value.quantity, price: value.price, amount: value.quantity * value.price - value.fee, tags: value.tags.map(\.name), note: value.note) }
-    private func dividendRecord(_ value: Dividend) -> LedgerRecord? { guard TransactionFilter.matches(tags: value.tags, selectedTagIDs: selectedTagIDs) else { return nil }; return .init(id: value.id, type: "股息", date: value.date, symbol: value.investment?.symbol ?? "", account: value.account?.name ?? "", accountID: value.account?.id, quantity: nil, price: nil, amount: value.receivedAmount, tags: value.tags.map(\.name), note: value.note) }
+    private func buyRecord(_ value: Purchase) -> LedgerRecord? { guard TransactionFilter.matches(tags: value.tags, selectedTagIDs: selectedTagIDs) else { return nil }; return .init(id: value.id, type: "买入", date: value.date, symbol: value.investment?.symbol ?? "", account: value.account?.name ?? "", accountID: value.account?.id, quantity: value.quantity, price: value.price, amount: value.quantity * value.price + value.fee, tags: value.tags.map(\.name), note: value.note, fee: value.fee) }
+    private func saleRecord(_ value: Sale) -> LedgerRecord? { guard TransactionFilter.matches(tags: value.tags, selectedTagIDs: selectedTagIDs) else { return nil }; return .init(id: value.id, type: "卖出", date: value.date, symbol: value.investment?.symbol ?? "", account: value.account?.name ?? "", accountID: value.account?.id, quantity: value.quantity, price: value.price, amount: value.quantity * value.price - value.fee, tags: value.tags.map(\.name), note: value.note, fee: value.fee) }
+    private func dividendRecord(_ value: Dividend) -> LedgerRecord? { guard TransactionFilter.matches(tags: value.tags, selectedTagIDs: selectedTagIDs) else { return nil }; return .init(id: value.id, type: "股息", date: value.date, symbol: value.investment?.symbol ?? "", account: value.account?.name ?? "", accountID: value.account?.id, quantity: nil, price: nil, amount: value.receivedAmount, tags: value.tags.map(\.name), note: value.note, grossAmount: value.grossAmount, withholdingTax: value.withholdingTax, receivedAmount: value.receivedAmount) }
     private func add(_ draft: TransactionDraft) { guard draft.first > 0, draft.second >= 0, draft.fee >= 0 else { message = "保存失败：请输入有效数字"; return }; switch draft.kind { case .buy: context.insert(Purchase(date: draft.date, quantity: draft.first, price: draft.second, fee: draft.fee, note: draft.note, account: draft.account, investment: draft.investment)); case .sell: let held = purchases.filter { $0.account?.id == draft.account.id && $0.investment?.id == draft.investment.id }.reduce(0) { $0 + $1.quantity } - sales.filter { $0.account?.id == draft.account.id && $0.investment?.id == draft.investment.id }.reduce(0) { $0 + $1.quantity }; guard draft.first <= held else { message = "保存失败：可卖数量仅 \(held)"; return }; context.insert(Sale(date: draft.date, quantity: draft.first, price: draft.second, fee: draft.fee, note: draft.note, account: draft.account, investment: draft.investment)); case .dividend: guard draft.second <= draft.first else { message = "保存失败：预扣税不能超过税前股息"; return }; context.insert(Dividend(date: draft.date, grossAmount: draft.first, withholdingTax: draft.second, actualReceivedAmount: draft.fee, note: draft.note, account: draft.account, investment: draft.investment)) }; do { try context.save(); adding = false; message = "记录已保存" } catch { message = "保存失败：\(error.localizedDescription)" } }
     private func delete(_ record: LedgerRecord) { delete(ids: [record.id]); selectedRecordIDs.remove(record.id) }
     private func delete(ids: Set<UUID>) { purchases.filter { ids.contains($0.id) }.forEach { context.delete($0) }; sales.filter { ids.contains($0.id) }.forEach { context.delete($0) }; dividends.filter { ids.contains($0.id) }.forEach { context.delete($0) }; do { try context.save(); message = "已删除 \(ids.count) 笔交易" } catch { message = "删除失败：\(error.localizedDescription)" } }
@@ -314,20 +363,57 @@ struct TransactionLedgerView: View {
     private func toggleSelectAll() { let visible = Set(records.map(\.id)); if !visible.isEmpty, visible.isSubset(of: selectedRecordIDs) { selectedRecordIDs.subtract(visible) } else { selectedRecordIDs.formUnion(visible) } }
     private func exportCSV(_ values: [LedgerRecord], name: String) { document = .init(data: ExportService.csv(values)); exportType = .commaSeparatedText; exportName = name; exporting = true }
     private func exportSelected() { exportCSV(records.filter { selectedRecordIDs.contains($0.id) }, name: "DCA-Tracker-selected-ledger") }
-    private func applyEdit(_ record: LedgerRecord, account: BrokerageAccount, date: Date, first: Decimal, second: Decimal, fee: Decimal, note: String) { guard first >= 0, second >= 0, fee >= 0 else { return }; if let value = purchases.first(where: { $0.id == record.id }) { value.date = date; value.quantity = first; value.price = second; value.fee = fee; value.note = note; value.account = account }; if let value = sales.first(where: { $0.id == record.id }) { value.date = date; value.quantity = first; value.price = second; value.fee = fee; value.note = note; value.account = account }; if let value = dividends.first(where: { $0.id == record.id }) { value.date = date; value.grossAmount = first; value.withholdingTax = second; value.actualReceivedAmount = fee; value.note = note; value.account = account }; try? context.save() }
+    @discardableResult
+    private func applyEdit(_ record: LedgerRecord, account: BrokerageAccount, date: Date, first: Decimal, second: Decimal, fee: Decimal, note: String) -> String? {
+        guard first >= 0, second >= 0, fee >= 0 else { return "保存失败：请输入有效数字" }
+        if let value = purchases.first(where: { $0.id == record.id }) {
+            guard first > 0 else { return "保存失败：请输入有效数字" }
+            let target = netQuantity(accountID: account.id, investmentID: value.investment?.id, excludingPurchase: value.id) + first
+            guard target >= 0 else { return "保存失败：修改后该账户持仓不能为负" }
+            if value.account?.id != account.id {
+                let source = netQuantity(accountID: value.account?.id, investmentID: value.investment?.id, excludingPurchase: value.id)
+                guard source >= 0 else { return "保存失败：移出后原账户持仓不能为负" }
+            }
+            value.date = date; value.quantity = first; value.price = second; value.fee = fee; value.note = note; value.account = account
+        } else if let value = sales.first(where: { $0.id == record.id }) {
+            guard first > 0 else { return "保存失败：请输入有效数字" }
+            let available = netQuantity(accountID: account.id, investmentID: value.investment?.id, excludingSale: value.id)
+            guard first <= available else { return "保存失败：可卖数量仅 \(available)" }
+            value.date = date; value.quantity = first; value.price = second; value.fee = fee; value.note = note; value.account = account
+        } else if let value = dividends.first(where: { $0.id == record.id }) {
+            guard first > 0 else { return "保存失败：请输入有效数字" }
+            guard second <= first else { return "保存失败：预扣税不能超过税前股息" }
+            value.date = date; value.grossAmount = first; value.withholdingTax = second; value.actualReceivedAmount = fee; value.note = note; value.account = account
+        }
+        do { try context.save(); message = "记录已保存"; return nil } catch { return "保存失败：\(error.localizedDescription)" }
+    }
+    private func netQuantity(accountID: UUID?, investmentID: UUID?, excludingPurchase: UUID? = nil, excludingSale: UUID? = nil) -> Decimal {
+        let bought = purchases.filter { $0.id != excludingPurchase && $0.account?.id == accountID && $0.investment?.id == investmentID }.reduce(Decimal.zero) { $0 + $1.quantity }
+        let sold = sales.filter { $0.id != excludingSale && $0.account?.id == accountID && $0.investment?.id == investmentID }.reduce(Decimal.zero) { $0 + $1.quantity }
+        return bought - sold
+    }
     private func editAccounts(for record: LedgerRecord) -> [BrokerageAccount] { var result = accounts.filter { !$0.isArchived }; if let current = accounts.first(where: { $0.id == record.accountID }), !result.contains(where: { $0.id == current.id }) { result.insert(current, at: 0) }; return result }
     private var graph: BackupGraph { .init(accounts: accounts, investments: investments, tags: tags, purchases: purchases, sales: sales, dividends: dividends, portfolios: portfolios, assets: assets, plans: plans, executions: executions) }
     private func exportBackup() { if let data = try? FullBackupService.encode(FullBackupService.capture(graph)) { document = .init(data: data); exportType = .json; exportName = "DCA-Tracker-complete-backup"; exporting = true } }
 }
 
 enum TransactionDraftKind: String, CaseIterable, Identifiable { case buy = "买入", sell = "卖出", dividend = "股息"; var id: Self { self } }
+
+enum TransactionEntryMath {
+    /// 按金额买入才用金额换算股数。卖出和股息必须沿用用户填写的股数或税前金额，不能套用买入换算。
+    static func quantity(kind: TransactionDraftKind, buyByAmount: Bool, shares: Decimal, unitPrice: Decimal, amountUSD: Decimal) -> Decimal {
+        guard kind == .buy, buyByAmount else { return shares }
+        guard unitPrice > 0 else { return 0 }
+        return amountUSD / unitPrice
+    }
+}
 struct TransactionDraft { let kind: TransactionDraftKind; let account: BrokerageAccount; let investment: Investment; let date: Date; let first, second, fee: Decimal; let note: String }
 
 struct TransactionEntrySheet: View {
     let accounts: [BrokerageAccount]; let investments: [Investment]; let onSave: (TransactionDraft) -> Void
     @Environment(\.dismiss) private var dismiss; @State private var kind = TransactionDraftKind.buy; @State private var accountID: UUID; @State private var investmentID: UUID; @State private var date = Date(); @State private var first: Decimal = 0; @State private var second: Decimal = 0; @State private var fee: Decimal = 0; @State private var note = ""; @State private var buyByAmount = true; @State private var amountUSD: Decimal = 0
-    init(accounts: [BrokerageAccount], investments: [Investment], onSave: @escaping (TransactionDraft) -> Void) { self.accounts = accounts; self.investments = investments; self.onSave = onSave; let preferred = accounts.first { $0.name.localizedCaseInsensitiveContains("嘉信") || $0.name.localizedCaseInsensitiveContains("schwab") || $0.name.localizedCaseInsensitiveContains("charles") }; _accountID = State(initialValue: preferred?.id ?? accounts.first!.id); _investmentID = State(initialValue: investments.first!.id) }
-    private var derivedShares: Decimal { buyByAmount && second > 0 ? amountUSD / second : first }
+    init(accounts: [BrokerageAccount], investments: [Investment], onSave: @escaping (TransactionDraft) -> Void) { self.accounts = accounts; self.investments = investments; self.onSave = onSave; _accountID = State(initialValue: AccountPreference.preferredTradingAccount(accounts)?.id ?? accounts.first?.id ?? UUID()); _investmentID = State(initialValue: investments.first?.id ?? UUID()) }
+    private var submittedFirst: Decimal { TransactionEntryMath.quantity(kind: kind, buyByAmount: buyByAmount, shares: first, unitPrice: second, amountUSD: amountUSD) }
     var body: some View { Form {
         Picker("类型", selection: $kind) { ForEach(TransactionDraftKind.allCases) { Text($0.rawValue).tag($0) } }
         Picker("账户", selection: $accountID) { ForEach(accounts) { Text($0.name).tag($0.id) } }
@@ -338,7 +424,7 @@ struct TransactionEntrySheet: View {
             if buyByAmount {
                 TextField("购买金额（美元）", value: $amountUSD, format: .number)
                 TextField("购入价（美元/股）", value: $second, format: .number)
-                if second > 0 { Text("约 \(derivedShares.formatted(.number.precision(.fractionLength(2)))) 股").font(.caption).foregroundStyle(.secondary) }
+                if second > 0 { Text("约 \(submittedFirst.formatted(.number.precision(.fractionLength(2)))) 股").font(.caption).foregroundStyle(.secondary) }
             } else {
                 TextField("股数", value: $first, format: .number)
                 TextField("购入价（美元/股）", value: $second, format: .number)
@@ -350,15 +436,24 @@ struct TransactionEntrySheet: View {
             TextField("税前股息", value: $first, format: .number); TextField("预扣税", value: $second, format: .number); TextField("实际到账", value: $fee, format: .number)
         }
         TextField("备注", text: $note)
-        HStack { Button("取消") { dismiss() }; Spacer(); Button("保存") { guard let account = accounts.first(where: { $0.id == accountID }), let investment = investments.first(where: { $0.id == investmentID }) else { return }; onSave(.init(kind: kind, account: account, investment: investment, date: date, first: derivedShares, second: second, fee: fee, note: note)) }.buttonStyle(.borderedProminent).disabled((buyByAmount && kind == .buy ? amountUSD <= 0 : first <= 0) || second < 0 || fee < 0) }
+        HStack { Button("取消") { dismiss() }; Spacer(); Button("保存") { guard let account = accounts.first(where: { $0.id == accountID }), let investment = investments.first(where: { $0.id == investmentID }) else { return }; onSave(.init(kind: kind, account: account, investment: investment, date: date, first: submittedFirst, second: second, fee: fee, note: note)) }.buttonStyle(.borderedProminent).disabled((buyByAmount && kind == .buy ? amountUSD <= 0 : first <= 0) || second < 0 || fee < 0) }
     }.formStyle(.grouped).padding().frame(width: 500).navigationTitle("新增投资记录") }
 }
 
 struct TransactionEditSheet: View {
-    let record: LedgerRecord; let accounts: [BrokerageAccount]; let onSave: (BrokerageAccount, Date, Decimal, Decimal, Decimal, String) -> Void
-    @Environment(\.dismiss) private var dismiss; @State private var accountID: UUID; @State private var date: Date; @State private var first: Decimal; @State private var second: Decimal; @State private var fee: Decimal; @State private var note: String
-    init(record: LedgerRecord, accounts: [BrokerageAccount], onSave: @escaping (BrokerageAccount, Date, Decimal, Decimal, Decimal, String) -> Void) { self.record = record; self.accounts = accounts; self.onSave = onSave; _accountID = State(initialValue: record.accountID ?? accounts.first!.id); _date = State(initialValue: record.date); _first = State(initialValue: record.quantity ?? record.amount); _second = State(initialValue: record.price ?? 0); _fee = State(initialValue: record.type == "股息" ? record.amount : 0); _note = State(initialValue: record.note) }
-    var body: some View { Form { Picker("账户", selection: $accountID) { ForEach(accounts) { Text($0.name).tag($0.id) } }; DatePicker("日期", selection: $date); TextField(record.type == "股息" ? "税前股息" : "数量", value: $first, format: .number); TextField(record.type == "股息" ? "预扣税" : "价格", value: $second, format: .number); TextField(record.type == "股息" ? "实际到账" : "手续费", value: $fee, format: .number); TextField("备注", text: $note); HStack { Button("取消") { dismiss() }; Spacer(); Button("保存") { guard let account = accounts.first(where: { $0.id == accountID }) else { return }; onSave(account, date, first, second, fee, note) }.buttonStyle(.borderedProminent).disabled(first < 0 || second < 0 || fee < 0) } }.formStyle(.grouped).padding().frame(width: 460) }
+    let record: LedgerRecord; let accounts: [BrokerageAccount]; let onSave: (BrokerageAccount, Date, Decimal, Decimal, Decimal, String) -> String?
+    @Environment(\.dismiss) private var dismiss; @State private var accountID: UUID; @State private var date: Date; @State private var first: Decimal; @State private var second: Decimal; @State private var fee: Decimal; @State private var note: String; @State private var error = ""
+    init(record: LedgerRecord, accounts: [BrokerageAccount], onSave: @escaping (BrokerageAccount, Date, Decimal, Decimal, Decimal, String) -> String?) {
+        self.record = record; self.accounts = accounts; self.onSave = onSave
+        let seed = record.editAmounts
+        _accountID = State(initialValue: record.accountID ?? accounts.first!.id)
+        _date = State(initialValue: record.date)
+        _first = State(initialValue: seed.first)
+        _second = State(initialValue: seed.second)
+        _fee = State(initialValue: seed.third)
+        _note = State(initialValue: record.note)
+    }
+    var body: some View { Form { Picker("账户", selection: $accountID) { ForEach(accounts) { Text($0.name).tag($0.id) } }; DatePicker("日期", selection: $date); TextField(record.type == "股息" ? "税前股息" : "数量", value: $first, format: .number); TextField(record.type == "股息" ? "预扣税" : "价格", value: $second, format: .number); TextField(record.type == "股息" ? "实际到账" : "手续费", value: $fee, format: .number); TextField("备注", text: $note); if !error.isEmpty { Text(error).foregroundStyle(.red) }; HStack { Button("取消") { dismiss() }; Spacer(); Button("保存") { guard let account = accounts.first(where: { $0.id == accountID }) else { return }; if let message = onSave(account, date, first, second, fee, note) { error = message } else { dismiss() } }.buttonStyle(.borderedProminent).disabled(first < 0 || second < 0 || fee < 0) } }.formStyle(.grouped).padding().frame(width: 460) }
 }
 
 struct AccountEditSheet: View {
