@@ -37,6 +37,22 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(investment.symbol, "VXUS")
     }
 
+    func testPreferredTradingAccountSkipsArchivedAndPrefersSchwab() {
+        let archived = BrokerageAccount(name: "嘉信理财", isArchived: true)
+        let other = BrokerageAccount(name: "Fidelity")
+        let schwab = BrokerageAccount(name: "Schwab Brokerage")
+        XCTAssertEqual(AccountPreference.preferredTradingAccount([archived, other, schwab])?.id, schwab.id)
+        XCTAssertEqual(AccountPreference.preferredTradingAccount([other])?.id, other.id)
+        XCTAssertNil(AccountPreference.preferredTradingAccount([archived]))
+    }
+
+    func testSellEntryDoesNotReuseBuyAmountConversion() {
+        XCTAssertEqual(TransactionEntryMath.quantity(kind: .sell, buyByAmount: true, shares: 3, unitPrice: 20, amountUSD: 0), 3)
+        XCTAssertEqual(TransactionEntryMath.quantity(kind: .dividend, buyByAmount: true, shares: 12, unitPrice: 2, amountUSD: 0), 12)
+        XCTAssertEqual(TransactionEntryMath.quantity(kind: .buy, buyByAmount: true, shares: 1, unitPrice: 25, amountUSD: 100), 4)
+        XCTAssertEqual(TransactionEntryMath.quantity(kind: .buy, buyByAmount: false, shares: Decimal(string: "1.25")!, unitPrice: 25, amountUSD: 100), Decimal(string: "1.25")!)
+    }
+
     func testArchivedAccountRetainsIdentityAndHistoryFlag() {
         let account = BrokerageAccount(name: "Historical", isArchived: true)
         XCTAssertTrue(account.isArchived)

@@ -12,6 +12,14 @@ final class StubURLProtocol: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
+private final class CountingQuoteSource: QuoteDataSource, @unchecked Sendable {
+    var count = 0
+    func quote(symbol: String, apiKey: String) async throws -> MarketQuote {
+        count += 1
+        return .init(symbol: symbol, price: 3, previousClose: nil, timestamp: Date())
+    }
+}
+
 final class QuoteServiceTests: XCTestCase {
     private func source(status: Int = 200, body: String) -> TwelveDataSource {
         StubURLProtocol.handler = { request in (.init(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!, Data(body.utf8)) }
@@ -54,6 +62,20 @@ final class QuoteServiceTests: XCTestCase {
         _ = try await TwelveDataSource(session: URLSession(configuration: config)).history(symbol: "SPY", startDate: utcCalendar.date(from: .init(year: 2025, month: 1, day: 4)), apiKey: "x")
         let startDate = requestedURL.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) }?.queryItems?.first { $0.name == "start_date" }?.value
         XCTAssertEqual(startDate, "2025-01-04")
+    }
+    @MainActor func testAutomaticRefreshSkipsQuotesInsideTheFreshWindow() async {
+        let fresh = Investment(symbol: "VTI", name: "VTI")
+        fresh.quoteUpdatedAt = Date()
+        let stale = Investment(symbol: "VXUS", name: "VXUS")
+        stale.quoteUpdatedAt = Date().addingTimeInterval(-600)
+        let source = CountingQuoteSource()
+        let outcome = await WatchedQuoteRefresh.apply(to: [fresh, stale], apiKey: "x", coordinator: QuoteCoordinator(source: source), minimumInterval: WatchedQuoteRefresh.automaticInterval)
+        XCTAssertEqual(outcome.updated, 1)
+        XCTAssertEqual(outcome.skipped, 1)
+        XCTAssertEqual(outcome.failures, [])
+        XCTAssertEqual(source.count, 1)
+        XCTAssertNil(fresh.latestPrice)
+        XCTAssertEqual(stale.latestPrice, Decimal(3))
     }
     func testHistoricalFailureFallsBackToCache() async throws {
         struct Failing: HistoricalQuoteDataSource { func history(symbol: String, startDate: Date?, apiKey: String) async throws -> [HistoricalPrice] { throw QuoteError.rateLimited } }

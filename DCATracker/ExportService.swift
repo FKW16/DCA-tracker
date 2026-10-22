@@ -6,6 +6,18 @@ struct LedgerRecord: Codable, Equatable, Identifiable {
     let id: UUID; let type: String; let date: Date; let symbol: String; let account: String
     var accountID: UUID? = nil
     let quantity: Decimal?; let price: Decimal?; let amount: Decimal; let tags: [String]; let note: String
+    var fee: Decimal? = nil
+    var grossAmount: Decimal? = nil
+    var withholdingTax: Decimal? = nil
+    var receivedAmount: Decimal? = nil
+
+    /// 编辑表单回填：买入/卖出为（股数, 价格, 手续费），股息为（税前, 预扣税, 实际到账）。
+    var editAmounts: (first: Decimal, second: Decimal, third: Decimal) {
+        if type == "股息" {
+            return (grossAmount ?? amount, withholdingTax ?? 0, receivedAmount ?? amount)
+        }
+        return (quantity ?? 0, price ?? 0, fee ?? 0)
+    }
 }
 struct BackupEnvelope: Codable, Equatable { static let currentVersion = 1; let version: Int; let createdAt: Date; let records: [LedgerRecord] }
 enum BackupError: Error, Equatable { case unsupportedVersion(Int), invalidData }
